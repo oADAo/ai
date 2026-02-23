@@ -6,16 +6,25 @@ import re
 import unicodedata
 from typing import List
 
-SENTENCE_SEP_RE = re.compile(r"([。！？!?；;\n]+)")
+# Include both CJK and ASCII punctuation after normalization.
+SENTENCE_SEP_RE = re.compile(r"([。！？!?；;\.\n]+)")
+
+FILLER_TOKENS = {
+    "嗯",
+    "呃",
+    "額",
+    "啊",
+    "喔",
+    "哦",
+    "這個",
+    "那個",
+    "然後",
+    "就是",
+}
 
 
 def normalize_text(text: str) -> str:
-    """Normalize script/ASR text for robust matching.
-
-    - NFKC full/half width normalization
-    - Unify quote variants and punctuation spacing
-    - Collapse repeated whitespace
-    """
+    """Normalize script/ASR text for robust matching."""
     text = unicodedata.normalize("NFKC", text)
     replacements = {
         "，": ",",
@@ -38,11 +47,24 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def split_sentences(text: str, max_len: int = 40) -> List[str]:
-    """Split a script into short sentence chunks for alignment.
+def tokenize_for_match(text: str) -> List[str]:
+    normalized = normalize_text(text).lower()
+    # Keep CJK as single chars + alnum words.
+    tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", normalized)
+    return [t for t in tokens if t]
 
-    Splits by Chinese/English punctuation first, then length-based fallback.
-    """
+
+def strip_fillers_for_match(text: str) -> str:
+    """Remove known filler words from matching string to improve alignment robustness."""
+    normalized = normalize_text(text)
+    for filler in sorted(FILLER_TOKENS, key=len, reverse=True):
+        normalized = normalized.replace(filler, "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def split_sentences(text: str, max_len: int = 40) -> List[str]:
+    """Split a script into short sentence chunks for alignment."""
     normalized = normalize_text(text)
     if not normalized:
         return []

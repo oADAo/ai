@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
+from typing import List, Tuple
 
 from .align import align_segments_to_script
 from .asr import transcribe
@@ -37,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pad", type=float, default=0.08)
     parser.add_argument("--merge-gap", type=float, default=0.20)
     parser.add_argument("--max-seg-sec", type=float, default=12.0)
+    parser.add_argument("--match-threshold", type=float, default=60.0)
+    parser.add_argument("--min-script-coverage", type=float, default=0.55)
+    parser.add_argument("--min-keep-ratio", type=float, default=0.35)
     return parser.parse_args()
 
 
@@ -55,6 +59,10 @@ def _probe_duration(audio_path: Path) -> float:
     return float(proc.stdout.strip())
 
 
+def _sum_intervals(intervals: List[Tuple[float, float]]) -> float:
+    return sum(max(0.0, e - s) for s, e in intervals)
+
+
 def main() -> None:
     args = parse_args()
     input_audio = Path(args.audio).resolve()
@@ -65,6 +73,7 @@ def main() -> None:
     asr_audio = out_dir / "asr_input_16k_mono.wav"
     preprocess_to_mono16k(input_audio, asr_audio)
 
+    total_duration = _probe_duration(asr_audio)
     silence_intervals = detect_silence(asr_audio, args.silence_db, args.silence_dur)
     script_text = script_path.read_text(encoding="utf-8")
     script_sentences = split_sentences(script_text)
@@ -74,7 +83,11 @@ def main() -> None:
 
     try:
         asr_segments = transcribe(asr_audio, model_size=args.model, language=args.language)
-        aligned = align_segments_to_script(asr_segments, script_sentences)
+        aligned = align_segments_to_script(
+            asr_segments,
+            script_sentences,
+            match_threshold=args.match_threshold,
+        )
         keep_intervals = build_keep_intervals(
             asr_segments,
             aligned["alignment"],
@@ -83,16 +96,28 @@ def main() -> None:
             merge_gap=args.merge_gap,
             max_seg_sec=args.max_seg_sec,
         )
+
+        keep_ratio = _sum_intervals(keep_intervals) / max(1e-6, total_duration)
+        script_coverage = float(aligned.get("script_coverage", 0.0))
+
         notes["missing_script_indices"] = aligned["missing_script_indices"]
+        notes["script_coverage"] = round(script_coverage, 4)
+        notes["keep_ratio"] = round(keep_ratio, 4)
         alignment_rows = aligned["alignment"]
+
+        if script_coverage < args.min_script_coverage or keep_ratio < args.min_keep_ratio:
+            raise RuntimeError(
+                "alignment quality too low; switching to silence-only fallback "
+                f"(script_coverage={script_coverage:.2f}, keep_ratio={keep_ratio:.2f})"
+            )
+
     except Exception as exc:  # fallback required by spec
         fallback_used = True
         asr_segments = []
         alignment_rows = []
-        duration = _probe_duration(asr_audio)
         keep_intervals = build_silence_only_keep_intervals(
             silence_intervals,
-            audio_duration=duration,
+            audio_duration=total_duration,
             silence_dur_threshold=args.silence_dur,
         )
         notes["fallback"] = "alignment_failed_silence_only"
@@ -110,10 +135,7 @@ def main() -> None:
         keep_intervals=keep_intervals,
         notes=notes,
     )
-    (out_dir / "plan.json").write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    (out_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     final_wav = out_dir / "final.wav"
     ffmpeg_cmd = build_ffmpeg_command(input_audio, final_wav, keep_intervals)

@@ -11,7 +11,7 @@ try:
 except Exception:  # pragma: no cover - fallback for offline environments
     fuzz = None
 
-from .script import normalize_text
+from .script import normalize_text, strip_fillers_for_match, tokenize_for_match
 
 
 @dataclass
@@ -26,22 +26,37 @@ def _simple_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio() * 100.0
 
 
+def _token_overlap(a: str, b: str) -> float:
+    ta = set(tokenize_for_match(a))
+    tb = set(tokenize_for_match(b))
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return (inter / max(1, union)) * 100.0
+
+
 def similarity(a: str, b: str) -> float:
-    a_norm = normalize_text(a)
-    b_norm = normalize_text(b)
+    a_norm = strip_fillers_for_match(normalize_text(a))
+    b_norm = strip_fillers_for_match(normalize_text(b))
     if not a_norm or not b_norm:
         return 0.0
+
     if fuzz is None:
-        return _simple_ratio(a_norm, b_norm)
-    ratio = fuzz.ratio(a_norm, b_norm)
-    token = fuzz.token_set_ratio(a_norm, b_norm)
-    return (ratio * 0.6) + (token * 0.4)
+        ratio = _simple_ratio(a_norm, b_norm)
+        token = _token_overlap(a_norm, b_norm)
+    else:
+        ratio = fuzz.ratio(a_norm, b_norm)
+        token = fuzz.token_set_ratio(a_norm, b_norm)
+
+    overlap = _token_overlap(a_norm, b_norm)
+    return (ratio * 0.45) + (token * 0.35) + (overlap * 0.20)
 
 
 def align_segments_to_script(
     asr_segments: Sequence[Dict],
     script_sentences: Sequence[str],
-    match_threshold: float = 55.0,
+    match_threshold: float = 60.0,
 ) -> Dict:
     """Align ASR segments to script sentences via DP."""
     n = len(asr_segments)
@@ -51,7 +66,7 @@ def align_segments_to_script(
     back: List[List[Optional[tuple]]] = [[None] * (m + 1) for _ in range(n + 1)]
     dp[0][0] = 0.0
 
-    insert_penalty = 15.0
+    insert_penalty = 13.0
     delete_penalty = 10.0
 
     for i in range(n + 1):
@@ -74,7 +89,8 @@ def align_segments_to_script(
 
             if i < n and j < m:
                 score = similarity(asr_segments[i]["text"], script_sentences[j])
-                bonus = (i / max(1, n - 1 if n > 1 else 1)) * 12.0
+                # Prefer keeping later retries when similar.
+                bonus = (i / max(1, n - 1 if n > 1 else 1)) * 10.0
                 cand = base + score + bonus
                 if cand > dp[i + 1][j + 1]:
                     dp[i + 1][j + 1] = cand
@@ -107,4 +123,5 @@ def align_segments_to_script(
     return {
         "alignment": [item.__dict__ for item in alignment],
         "missing_script_indices": inserted_script,
+        "script_coverage": (len(matched_script) / max(1, m)),
     }

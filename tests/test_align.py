@@ -17,3 +17,10 @@ def test_align_prefers_later_duplicate_for_single_script_sentence():
     assert len(matched) == 1
     assert matched[0]["asr_index"] == 1
     assert any(d["asr_index"] == 0 for d in deleted)
+
+
+def test_align_coverage_exposed():
+    asr_segments = [{"text": "第一句"}, {"text": "第二句"}]
+    script = ["第一句", "第二句"]
+    result = align_segments_to_script(asr_segments, script, match_threshold=40)
+    assert result["script_coverage"] > 0.9
